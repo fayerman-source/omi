@@ -190,8 +190,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     setShowRatingUi(false);
   }
 
-  Future initConversation() async {
-    // updateLoadingState(true);
+  void _disposeControllers() {
     titleController?.dispose();
     titleFocusNode?.dispose();
     overviewController?.dispose();
@@ -205,6 +204,10 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
     segmentControllers.clear();
     segmentFocusNodes.clear();
+  }
+
+  Future initConversation() async {
+    _disposeControllers();
 
     _ratingTimer?.cancel();
     showRatingUI = false;
@@ -534,20 +537,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   @override
   void dispose() {
     _ratingTimer?.cancel();
-    titleController?.dispose();
-    titleFocusNode?.dispose();
-    overviewController?.dispose();
-    overviewFocusNode?.dispose();
-
-    for (var controller in segmentControllers.values) {
-      controller.dispose();
-    }
-    for (var focusNode in segmentFocusNodes.values) {
-      focusNode.dispose();
-    }
-    segmentControllers.clear();
-    segmentFocusNodes.clear();
-
+    _disposeControllers();
     super.dispose();
   }
 }

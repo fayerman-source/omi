@@ -335,37 +335,47 @@ def update_conversation_segment_text(uid: str, conversation_id: str, segment_id:
     user_ref = db.collection('users').document(uid)
     conversation_ref = user_ref.collection(conversations_collection).document(conversation_id)
 
-    doc_snapshot = conversation_ref.get()
-    if not doc_snapshot.exists:
-        return
+    @firestore.transactional
+    def update_in_transaction(transaction):
+        doc_snapshot = conversation_ref.get(transaction=transaction)
+        if not doc_snapshot.exists:
+            return
 
-    conversation_data = doc_snapshot.to_dict()
+        conversation_data = doc_snapshot.to_dict()
+        level = conversation_data.get('data_protection_level', 'standard')
 
-    level = conversation_data.get('data_protection_level', 'standard')
-    decrypted_data = _prepare_conversation_for_read(conversation_data, uid)
-    if not decrypted_data:
-        return
+        decrypted_data = _prepare_conversation_for_read(conversation_data, uid)
+        if not decrypted_data:
+            return
 
-    transcript_segments = decrypted_data.get('transcript_segments', [])
+        transcript_segments = decrypted_data.get('transcript_segments', [])
 
-    # Find and update the segment
-    updated = False
-    for segment in transcript_segments:
-        if isinstance(segment, dict) and segment.get('id') == segment_id:
-            segment['text'] = text
-            updated = True
-            break
+        # Find and update the segment
+        updated = False
+        for segment in transcript_segments:
+            if isinstance(segment, dict) and segment.get('id') == segment_id:
+                segment['text'] = text
+                updated = True
+                break
 
-    if not updated:
-        return
+        if not updated:
+            return
 
-    prepared_data = _prepare_conversation_for_write({'transcript_segments': transcript_segments}, uid, level)
+        prepared_data = _prepare_conversation_for_write(
+            {'transcript_segments': transcript_segments},
+            uid,
+            level,
+        )
 
-    update_dict = {'transcript_segments': prepared_data['transcript_segments']}
-    if 'transcript_segments_compressed' in prepared_data:
-        update_dict['transcript_segments_compressed'] = prepared_data['transcript_segments_compressed']
+        update_dict = {'transcript_segments': prepared_data['transcript_segments']}
 
-    conversation_ref.update(update_dict)
+        if 'transcript_segments_compressed' in prepared_data:
+            update_dict['transcript_segments_compressed'] = prepared_data['transcript_segments_compressed']
+
+        transaction.update(conversation_ref, update_dict)
+
+    transaction = db.transaction()
+    update_in_transaction(transaction)
 
 
 def delete_conversation(uid, conversation_id):
@@ -922,10 +932,8 @@ def store_conversation_photos(uid: str, conversation_id: str, photos: List[Conve
 @prepare_for_read(decrypt_func=_prepare_conversation_for_read)
 @with_photos(get_conversation_photos)
 def get_closest_conversation_to_timestamps(uid: str, start_timestamp: int, end_timestamp: int) -> Optional[dict]:
-    print('get_closest_conversation_to_timestamps', start_timestamp, end_timestamp)
-    start_threshold = datetime.utcfromtimestamp(start_timestamp) - timedelta(minutes=2)
-    end_threshold = datetime.utcfromtimestamp(end_timestamp) + timedelta(minutes=2)
-    print('get_closest_conversation_to_timestamps', start_threshold, end_threshold)
+    start_threshold = datetime.fromtimestamp(start_timestamp, tz=timezone.utc) - timedelta(minutes=2)
+    end_threshold = datetime.fromtimestamp(end_timestamp, tz=timezone.utc) + timedelta(minutes=2)
 
     query = (
         db.collection('users')
