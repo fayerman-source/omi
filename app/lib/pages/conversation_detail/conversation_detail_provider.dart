@@ -22,8 +22,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   // late ServerConversation memory;
 
-  int conversationIdx = 0;
   DateTime selectedDate = DateTime.now();
+  String? _cachedConversationId;
 
   bool isLoading = false;
   bool loadingReprocessConversation = false;
@@ -35,6 +35,8 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   // Cache enabled conversation apps and suggested apps
   final List<App> _cachedEnabledConversationApps = [];
   final List<App> _cachedSuggestedApps = [];
+  // Track locally added apps (e.g., from quick template creator) to preserve during refetch
+  final Set<String> _locallyAddedAppIds = {};
 
   List<App> get appsList => appProvider?.apps ?? [];
 
@@ -50,18 +52,28 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   ServerConversation? _cachedConversation;
   ServerConversation get conversation {
-    if (conversationProvider == null ||
-        !conversationProvider!.groupedConversations.containsKey(selectedDate) ||
-        conversationProvider!.groupedConversations[selectedDate] == null ||
-        conversationProvider!.groupedConversations[selectedDate]!.length <= conversationIdx) {
-      // Return cached conversation if available, otherwise create an empty one
-      if (_cachedConversation == null) {
-        throw StateError("No conversation available");
+    final list = conversationProvider?.groupedConversations[selectedDate];
+    final id = _cachedConversationId;
+
+    ServerConversation? result;
+
+    if (list != null && list.isNotEmpty) {
+      if (id != null) {
+        result = list.firstWhereOrNull((c) => c.id == id);
       }
-      return _cachedConversation!;
+      result ??= list.first;
+      _cachedConversationId = result.id;
     }
-    _cachedConversation = conversationProvider!.groupedConversations[selectedDate]![conversationIdx];
-    return _cachedConversation!;
+
+    result ??= _cachedConversation;
+    if (result != null &&
+        result.createdAt.year == selectedDate.year &&
+        result.createdAt.month == selectedDate.month &&
+        result.createdAt.day == selectedDate.day) {
+      return _cachedConversation = result;
+    }
+
+    throw StateError("No valid conversation found");
   }
 
   List<bool> appResponseExpanded = [];
@@ -134,9 +146,16 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     notifyListeners();
   }
 
-  void updateConversation(int memIdx, DateTime date) {
-    conversationIdx = memIdx;
+  void updateConversation(String conversationId, DateTime date) {
     selectedDate = date;
+    final list = conversationProvider?.groupedConversations[date];
+    if (list != null) {
+      final conv = list.firstWhereOrNull((c) => c.id == conversationId);
+      if (conv != null) {
+        _cachedConversationId = conv.id;
+        _cachedConversation = conv;
+      }
+    }
     appResponseExpanded = List.filled(conversation.appResults.length, false);
     notifyListeners();
   }
@@ -236,14 +255,26 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
     final summarizedApp = getSummarizedApp();
     if (summarizedApp != null) {
-      final originalOverview = summarizedApp.content;
-      overviewController!.text = originalOverview;
+      overviewController!.text = summarizedApp.content;
+
+      String lastSavedOverview = summarizedApp.content;
+
       overviewFocusNode!.addListener(() {
         if (!overviewFocusNode!.hasFocus) {
           final newOverview = overviewController!.text;
-          if (originalOverview != newOverview) {
+          if (lastSavedOverview != newOverview) {
+            // Update both the structured overview and the app result content
             conversation.structured.overview = newOverview;
+            if (conversation.appResults.isNotEmpty) {
+              conversation.appResults[0] = AppResponse(
+                newOverview,
+                appId: conversation.appResults[0].appId,
+                id: conversation.appResults[0].id,
+              );
+            }
             updateConversationOverview(conversation.id, newOverview);
+            lastSavedOverview = newOverview;
+            notifyListeners();
           }
         }
       });
@@ -355,18 +386,10 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   /// Returns the first app result from the conversation if available
   /// This is typically the summary of the conversation
-  /// over AI generated summaries to ensure edits persist after refresh
   AppResponse? getSummarizedApp() {
-    final fallback = conversation.appResults.isNotEmpty ? conversation.appResults[0] : null;
-
-    if (fallback != null && conversation.structured.overview.isNotEmpty) {
-      return AppResponse(
-        conversation.structured.overview,
-        appId: fallback.appId,
-        id: fallback.id,
-      );
+    if (conversation.appResults.isNotEmpty) {
+      return conversation.appResults[0];
     }
-
     // If no appResults but we have overview, create synthetic response
     if (conversation.structured.overview.isNotEmpty) {
       return AppResponse(
@@ -374,9 +397,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
         appId: null,
       );
     }
-
-    // Fall back to AI generated app result if no user edit exists
-    return fallback;
+    return null;
   }
 
   /// Returns the list of suggested summarization apps for this conversation
@@ -416,11 +437,28 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
   }
 
   /// Fetches and caches enabled conversation apps
+  /// Preserves locally added apps that may not yet be returned by the API
   Future<void> fetchAndCacheEnabledConversationApps() async {
     try {
       final apps = await getEnabledConversationAppsFromAPI();
+
+      // Preserve locally added apps that aren't in the API response yet
+      final locallyAddedApps =
+          _cachedEnabledConversationApps.where((app) => _locallyAddedAppIds.contains(app.id)).toList();
+
       _cachedEnabledConversationApps.clear();
       _cachedEnabledConversationApps.addAll(apps);
+
+      // Add back locally added apps if they weren't returned by the API
+      for (final localApp in locallyAddedApps) {
+        if (!apps.any((app) => app.id == localApp.id)) {
+          _cachedEnabledConversationApps.add(localApp);
+        } else {
+          // If API returned the app, remove from locally tracked set
+          _locallyAddedAppIds.remove(localApp.id);
+        }
+      }
+
       notifyListeners();
     } catch (e) {
       debugPrint('Error fetching and caching enabled conversation apps: $e');
@@ -484,6 +522,20 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
     }
   }
 
+  /// Adds an app to the cached enabled conversation apps list
+  /// Used when a new app is created and installed from the quick template creator
+  void addToEnabledConversationApps(App app) {
+    final existingIndex = _cachedEnabledConversationApps.indexWhere((a) => a.id == app.id);
+    if (existingIndex == -1) {
+      _cachedEnabledConversationApps.add(app);
+    } else {
+      _cachedEnabledConversationApps[existingIndex] = app;
+    }
+    // Track this as a locally added app so it's preserved during refetch
+    _locallyAddedAppIds.add(app.id);
+    notifyListeners();
+  }
+
   /// Checks if an app is in the suggested apps list
   bool isAppSuggested(String appId) {
     return getSuggestedApps().contains(appId);
@@ -497,6 +549,7 @@ class ConversationDetailProvider extends ChangeNotifier with MessageNotifierMixi
 
   void setCachedConversation(ServerConversation conversation) {
     _cachedConversation = conversation;
+    _cachedConversationId = conversation.id;
     notifyListeners();
   }
 
