@@ -248,3 +248,4 @@ class _SecondarySocketListener implements IPureSocketListener {
   @override
   void onError(Object err, StackTrace trace) => _composite._onSocketError('Secondary', err, trace);
 }
+
